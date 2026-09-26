@@ -56,15 +56,29 @@ connectors:
       decode_time_major_conv: true
       decode_cudnn_benchmark: true
 
-stages:
-  # qwen3_tts.yaml bounds stage 0 at 512 tokens per step, on the reasoning that
-  # small per-step batches keep first-chunk latency low. That holds for a short
-  # prompt. It does not hold for in-context voice cloning: the reference audio
-  # becomes a codec-code prefix, so an 11-second reference is about 2200 tokens
-  # (137 frames x 16 code groups) and a 512-token budget splits that prefill
-  # across five steps. Measured on an L4 at concurrency 1, first byte went from
-  # 232 ms (one-step prefill) to 501 ms (chunked), while an x-vector-only
-  # request on the same server -- no code prefix, so a short prompt -- was
-  # unaffected at 63 ms. Budget the whole prefill in one step instead.
-  - stage_id: 0
-    max_num_batched_tokens: 32768
+# Measured on one L4 (24 GB) serving Qwen3-TTS-12Hz-1.7B Base voice-clone,
+# 4 rounds per level after 64 warmup requests, median first byte:
+#
+#   concurrency          1      2      4      8
+#   this profile     501ms  602ms  778ms  1128ms   starve 0 at every level
+#   V1 + fixed 1->25 232ms  406ms  675ms  1240ms   starve 84ms at 8
+#
+# So on this card the profile wins only at concurrency 8, where it also removes
+# the mid-sentence starve, and loses about 240 ms below that. Two notes for
+# anyone starting from this file:
+#
+#   * The first-frame delivery this profile enables does not apply to in-context
+#     voice cloning: _publish_first_audio skips any request carrying reference
+#     codes, because the first frame's waveform only equals Code2Wav's output
+#     when it has no decoder context. Measured on the same server with the same
+#     reference audio, an x-vector-only request went to 61 ms first byte while
+#     the in-context request stayed at 501 ms -- but its next packet still
+#     arrived at 470 ms, leaving a 333 ms hole, so time to audible audio
+#     improved only from 797 ms to 619 ms.
+#   * The 240 ms deficit below concurrency 8 is not located. Ruled out by
+#     measurement: warmup (64 requests moved it 13 ms), initial chunk size
+#     (the adaptive controller yields 2 frames at every concurrency up to
+#     max_num_seqs/2), the stage-0 per-step token budget (32768 vs the
+#     inherited 512 changed nothing), and the four optimizations above
+#     (turning them off made every level worse -- see
+#     qwen3_tts_l4_minimal.yaml). That leaves the MRV2 streaming path itself.

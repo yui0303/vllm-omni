@@ -17,6 +17,20 @@
 # code_predictor_kv_cache and code_predictor_fused_sampling are dropped in the
 # same step rather than one at a time; if this profile recovers the latency,
 # the next ablation splits them.
+#
+# RESULT: it does not. Measured on one L4, median first byte for an in-context
+# clone, 4 rounds per level after 64 warmup requests:
+#
+#   concurrency                    1      2      4      8    rtf(8)
+#   qwen3_tts_l4_latency        501ms  602ms  778ms  1128ms   0.44
+#   this profile (four off)     586ms  750ms 1078ms  1693ms   0.58
+#
+# Every level is worse and real-time factor degrades with it, so the four
+# settings earn their place on this card too, and the profile's latency deficit
+# against the V1 path is not theirs. Kept as a recorded ablation: do not reach
+# for these switches when latency looks wrong on a small card. The per-shape
+# cuDNN search does cost something on the first chunk of each new shape, but
+# less than the kernels it replaces save.
 base_config: qwen3_tts.yaml
 cuda_mps: false
 
@@ -32,8 +46,7 @@ connectors:
       decode_time_major_conv: false
       decode_cudnn_benchmark: false
 
-stages:
-  # Same reasoning as qwen3_tts_l4_latency.yaml: an in-context-cloning prefill
-  # is thousands of codec-code tokens and must not be split across steps.
-  - stage_id: 0
-    max_num_batched_tokens: 32768
+# The stage-0 per-step token budget is left at the inherited 512. Raising it to
+# 32768 so an in-context prefill runs in one step was measured and changed
+# nothing, so both profiles keep the base value and differ only in the four
+# switches above.
