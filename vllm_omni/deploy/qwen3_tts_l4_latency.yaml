@@ -1,0 +1,57 @@
+# Qwen3-TTS single-GPU latency-first profile, for one small CUDA card.
+#
+# Validated target: one NVIDIA L4 (24 GB, Ada / SM 89) on GCP g2-standard-8,
+# serving Qwen3-TTS-12Hz-1.7B Base voice-clone for interactive phone calls.
+#
+#   vllm serve <model> --omni \
+#     --deploy-config vllm_omni/deploy/qwen3_tts_l4_latency.yaml
+#
+# The shipped profiles target the throughput end: two H100s, or one H200 with
+# MPS and 128/64 stage capacities. This one targets the other end -- a single
+# 24 GB card, request rate under about 8 concurrent streams, and a hard budget
+# on first audible audio because a caller hears silence until the first packet
+# plays. It keeps qwen3_tts.yaml's CUDA MRV2 streaming path and first-frame
+# delivery, and differs only where the throughput profiles trade latency away.
+#
+# Differences from qwen3_tts.yaml:
+#
+#   * cuda_mps stays false (the default). The experimental single-GPU profile
+#     enables it; stage_configs.md documents that MPS can raise first-packet
+#     and first-audible-audio latency at low request rates, which is this
+#     profile's whole workload. Stated here rather than inherited so the
+#     choice is visible next to the profile it differs from.
+#
+#   * The adaptive chunk ramp stays on. talker_first_audio takes Code2Wav out
+#     of the first packet, but chunks 1+ still come from Code2Wav, and on a
+#     card this size the 1 -> 25 frame step starves playback mid-sentence:
+#     measured on an L4 at concurrency 1, a fixed 1 -> 25 step left a 587 ms
+#     gap about 0.6 s into the sentence, and the ramp removed it. The ramp is
+#     closed-loop on buffer depth, so it costs nothing once the buffer is deep.
+#
+#   * The single-frame and small-shape optimizations from
+#     qwen3_tts_high_concurrency_mrv2_single_gpu.yaml that do not require MPS.
+#     These change floating-point results; validate audio quality for the
+#     workload before adopting, as that profile's comments also require.
+#
+# Not adopted from the experimental single-GPU profile: FULL Talker graphs with
+# 43 capture sizes up to 512, 128/64 stage capacities, and B1-B8 codec graphs.
+# Those spend capture time and memory on batch shapes a 24 GB card at this
+# request rate never reaches. Codec batch buckets are left at the base
+# profile's values; on an L4 the first chunk's padded shape amortizes poorly
+# across a batch, so larger buckets bought no measurable first-packet win.
+base_config: qwen3_tts.yaml
+cuda_mps: false
+
+connectors:
+  connector_of_shared_memory:
+    extra:
+      talker_first_audio: true
+      # Chunk 0 comes from the Talker; size chunks 1+ from live buffer depth.
+      codec_chunk_adaptive: true
+      codec_chunk_min_frames: 2
+      # Code2Wav decode + shared-memory transfer margin.
+      codec_chunk_safety_margin_ms: 50
+      code_predictor_kv_cache: true
+      code_predictor_fused_sampling: true
+      decode_time_major_conv: true
+      decode_cudnn_benchmark: true
