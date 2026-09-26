@@ -55,3 +55,16 @@ connectors:
       code_predictor_fused_sampling: true
       decode_time_major_conv: true
       decode_cudnn_benchmark: true
+
+stages:
+  # qwen3_tts.yaml bounds stage 0 at 512 tokens per step, on the reasoning that
+  # small per-step batches keep first-chunk latency low. That holds for a short
+  # prompt. It does not hold for in-context voice cloning: the reference audio
+  # becomes a codec-code prefix, so an 11-second reference is about 2200 tokens
+  # (137 frames x 16 code groups) and a 512-token budget splits that prefill
+  # across five steps. Measured on an L4 at concurrency 1, first byte went from
+  # 232 ms (one-step prefill) to 501 ms (chunked), while an x-vector-only
+  # request on the same server -- no code prefix, so a short prompt -- was
+  # unaffected at 63 ms. Budget the whole prefill in one step instead.
+  - stage_id: 0
+    max_num_batched_tokens: 32768
