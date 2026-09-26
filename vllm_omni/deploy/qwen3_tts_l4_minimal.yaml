@@ -1,0 +1,39 @@
+# Ablation of qwen3_tts_l4_latency.yaml: keeps the CUDA MRV2 streaming path and
+# first-frame delivery, drops the four experimental optimizations.
+#
+# Why this file exists: the optimizations in
+# qwen3_tts_high_concurrency_mrv2_single_gpu.yaml were validated on an H200 at
+# concurrency 64. Two of them plausibly cost latency on a small card at low
+# concurrency, and this profile is how we tell:
+#
+#   * decode_cudnn_benchmark runs an exhaustive algorithm search the first time
+#     it sees each convolution shape. The adaptive chunk ramp produces a new
+#     shape on most early chunks, so the search cost lands on exactly the
+#     chunks whose latency we care about.
+#   * decode_time_major_conv replaces the codec convolutions with GEMMs, which
+#     wins when there is enough work to fill the card and need not win at
+#     batch 1 on an L4.
+#
+# code_predictor_kv_cache and code_predictor_fused_sampling are dropped in the
+# same step rather than one at a time; if this profile recovers the latency,
+# the next ablation splits them.
+base_config: qwen3_tts.yaml
+cuda_mps: false
+
+connectors:
+  connector_of_shared_memory:
+    extra:
+      talker_first_audio: true
+      codec_chunk_adaptive: true
+      codec_chunk_min_frames: 2
+      codec_chunk_safety_margin_ms: 50
+      code_predictor_kv_cache: false
+      code_predictor_fused_sampling: false
+      decode_time_major_conv: false
+      decode_cudnn_benchmark: false
+
+stages:
+  # Same reasoning as qwen3_tts_l4_latency.yaml: an in-context-cloning prefill
+  # is thousands of codec-code tokens and must not be split across steps.
+  - stage_id: 0
+    max_num_batched_tokens: 32768
